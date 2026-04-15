@@ -14,7 +14,7 @@ set -euo pipefail
 # ----------------------------
 # ENV VARIABLES — edit these
 # ----------------------------
-export BASTION_IP="190.170.31.41"
+export BASTION_IP="190.170.31.35"
 export BASTION_HOSTNAME="bastion-anish"
 export DOMAIN="anishs.xyz"
 export CLUSTER_NAME="ocp"
@@ -23,8 +23,8 @@ export MASTER1_IP="190.170.31.24"
 export MASTER2_IP="190.170.31.56"
 export MASTER3_IP="190.170.31.25"
 
-export API_IP="190.170.31.41"
-export INGRESS_IP="190.170.31.41"
+export API_IP="190.170.31.35"
+export INGRESS_IP="190.170.31.35"
 
 export FORWARD_FILE="anish.for"
 export REVERSE_FILE="anish.rev"
@@ -76,6 +76,84 @@ read -rp "Proceed? (yes/no): " CONFIRM
 [[ "$CONFIRM" != "yes" ]] && echo "Aborted." && exit 0
 
 # =============================================================
+# PART 0 — Repository Setup
+# =============================================================
+
+echo ""
+echo "============================================="
+echo " PART 0 — Repository Setup"
+echo "============================================="
+
+if dnf repolist enabled 2>/dev/null | grep -q "^[a-zA-Z]"; then
+    echo "  Repos already enabled — skipping repo setup."
+else
+    echo "  No enabled repositories found."
+    echo ""
+    echo "  How would you like to enable package repositories?"
+    echo "    1) Register with Red Hat Subscription Manager (RHSM) [Recommended for RHEL]"
+    echo "    2) Use CentOS Stream 9 mirrors (no subscription required)"
+    echo ""
+    read -rp "  Enter choice (1 or 2): " REPO_CHOICE
+
+    case "$REPO_CHOICE" in
+        1)
+            echo ""
+            echo "  RHSM Registration"
+            echo "  -----------------"
+            echo "  Choose registration method:"
+            echo "    a) Username + Password"
+            echo "    b) Activation Key + Org ID"
+            echo ""
+            read -rp "  Enter choice (a or b): " RHSM_METHOD
+
+            if [[ "$RHSM_METHOD" == "a" ]]; then
+                read -rp "  Red Hat username: " RHSM_USER
+                read -rsp "  Red Hat password: " RHSM_PASS
+                echo ""
+                subscription-manager register --username "$RHSM_USER" --password "$RHSM_PASS"
+            elif [[ "$RHSM_METHOD" == "b" ]]; then
+                read -rp "  Activation Key: " RHSM_KEY
+                read -rp "  Org ID:         " RHSM_ORG
+                subscription-manager register --activationkey "$RHSM_KEY" --org "$RHSM_ORG"
+            else
+                echo "  Invalid choice. Exiting."
+                exit 1
+            fi
+
+            echo "  Attaching subscription..."
+            subscription-manager attach --auto
+
+            echo "  Enabling required repos..."
+            subscription-manager repos \
+                --enable=rhel-9-for-x86_64-baseos-rpms \
+                --enable=rhel-9-for-x86_64-appstream-rpms
+            echo "  [OK] RHSM repos enabled."
+            ;;
+        2)
+            echo "  Adding CentOS Stream 9 mirror repos..."
+            cat > /etc/yum.repos.d/centos-stream9.repo <<'REPO'
+[cs9-baseos]
+name=CentOS Stream 9 - BaseOS
+baseurl=https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/
+gpgcheck=0
+enabled=1
+
+[cs9-appstream]
+name=CentOS Stream 9 - AppStream
+baseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
+gpgcheck=0
+enabled=1
+REPO
+            echo "  [OK] CentOS Stream 9 repos added."
+            ;;
+        *)
+            echo "  Invalid choice. Exiting."
+            exit 1
+            ;;
+    esac
+fi
+
+# =============================================================
 # PART 1 — DNS (BIND)
 # =============================================================
 
@@ -88,27 +166,7 @@ echo "============================================="
 # STEP 1 — Install BIND
 # ----------------------------
 echo "[1/7] Installing BIND..."
-
-if ! dnf repolist enabled 2>/dev/null | grep -q "^[a-zA-Z]"; then
-    echo "  No repos found. Adding CentOS Stream 8 vault repos..."
-    cat > /etc/yum.repos.d/centos.repo <<'REPO'
-[baseos]
-name=CentOS Stream 8 - BaseOS
-baseurl=http://vault.centos.org/8-stream/BaseOS/x86_64/os/
-enabled=1
-gpgcheck=0
-
-[appstream]
-name=CentOS Stream 8 - AppStream
-baseurl=http://vault.centos.org/8-stream/AppStream/x86_64/os/
-enabled=1
-gpgcheck=0
-REPO
-    echo "  Repo file created."
-fi
-
 dnf install -y bind bind-utils
-
 # ----------------------------
 # STEP 2 — /etc/hosts + /etc/resolv.conf
 # ----------------------------
