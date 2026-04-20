@@ -119,15 +119,6 @@ else
                 echo "  Invalid choice. Exiting."
                 exit 1
             fi
-
-            echo "  Attaching subscription..."
-            subscription-manager attach --auto
-
-            echo "  Enabling required repos..."
-            subscription-manager repos \
-                --enable=rhel-9-for-x86_64-baseos-rpms \
-                --enable=rhel-9-for-x86_64-appstream-rpms
-            echo "  [OK] RHSM repos enabled."
             ;;
         2)
             echo "  Adding CentOS Stream 9 mirror repos..."
