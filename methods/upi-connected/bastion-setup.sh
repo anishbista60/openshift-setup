@@ -13,6 +13,8 @@
 
 set -euo pipefail
 
+
+
 # ----------------------------
 # ENV VARIABLES — edit these
 # ----------------------------
@@ -20,6 +22,8 @@ export BASTION_IP="190.170.31.41"
 export BASTION_HOSTNAME="anish-bastion-ocp"
 export DOMAIN="anishs.xyz"
 export CLUSTER_NAME="ocp"
+
+export BOOTSTRAP_IP="190.170.31.58"
 
 export MASTER1_IP="190.170.31.34"
 export MASTER2_IP="190.170.31.45"
@@ -89,6 +93,7 @@ echo " Cluster        : $CLUSTER_NAME"
 echo " Bastion        : $BASTION_HOSTNAME ($BASTION_IP)"
 echo " API / API-INT  : $API_IP"
 echo " Ingress *.apps : $INGRESS_IP"
+echo " Bootstrap      : $BOOTSTRAP_IP"
 echo " Master-1       : $MASTER1_IP"
 echo " Master-2       : $MASTER2_IP"
 echo " Master-3       : $MASTER3_IP"
@@ -111,86 +116,18 @@ echo "============================================="
 echo " PART 0 — Repository Setup"
 echo "============================================="
 
-if dnf repolist enabled 2>/dev/null | grep -q "^[a-zA-Z]"; then
-    echo "  Repos already enabled — skipping repo setup."
-
-elif subscription-manager status 2>/dev/null | grep -q "Overall Status: Current"; then
-    # Already registered and entitled — repos just need enabling
-    echo "  System is already registered with RHSM and subscription is current."
-    echo "  Enabling repos..."
-    subscription-manager repos --enable=rhel-9-for-x86_64-baseos-rpms \
-                               --enable=rhel-9-for-x86_64-appstream-rpms \
-        && echo "  [OK] RHSM repos enabled." \
-        || echo "  [WARN] Could not enable RHSM repos — check entitlements."
-
+if subscription-manager identity 2>/dev/null | grep -qi "identity"; then
+    echo "  System is already registered with RHSM."
+    echo "  Skipping registration — enabling repos only."
 else
-    echo "  No enabled repositories found."
+    echo "  RHSM Registration"
+    echo "  -----------------"
+    read -rp "  Red Hat username: " RHSM_USER
+    read -rsp "  Red Hat password: " RHSM_PASS
     echo ""
-    echo "  How would you like to enable package repositories?"
-    echo "    1) Register with Red Hat Subscription Manager (RHSM) [Recommended for RHEL]"
-    echo "    2) Use CentOS Stream 9 mirrors (no subscription required)"
-    echo ""
-    read -rp "  Enter choice (1 or 2): " REPO_CHOICE
-
-    case "$REPO_CHOICE" in
-        1)
-            echo ""
-            echo "  RHSM Registration"
-            echo "  -----------------"
-
-            # Check if already registered (even if repos not yet enabled)
-            if subscription-manager identity 2>/dev/null | grep -q "system identity"; then
-                REGISTERED_ORG=$(subscription-manager identity 2>/dev/null | grep "org ID" | awk -F: '{print $2}' | xargs)
-                echo "  System is already registered (org: ${REGISTERED_ORG:-unknown})."
-                echo "  Skipping registration — enabling repos only."
-            else
-                echo "  Choose registration method:"
-                echo "    a) Username + Password"
-                echo "    b) Activation Key + Org ID"
-                echo ""
-                read -rp "  Enter choice (a or b): " RHSM_METHOD
-
-                if [[ "$RHSM_METHOD" == "a" ]]; then
-                    read -rp "  Red Hat username: " RHSM_USER
-                    read -rsp "  Red Hat password: " RHSM_PASS
-                    echo ""
-                    subscription-manager register --username "$RHSM_USER" --password "$RHSM_PASS" --force
-                elif [[ "$RHSM_METHOD" == "b" ]]; then
-                    read -rp "  Activation Key: " RHSM_KEY
-                    read -rp "  Org ID:         " RHSM_ORG
-                    subscription-manager register --activationkey "$RHSM_KEY" --org "$RHSM_ORG"
-                else
-                    echo "  Invalid choice. Exiting."
-                    exit 1
-                fi
-            fi
-
-            ;;
-
-        2)
-            echo "  Adding CentOS Stream 9 mirror repos..."
-            cat > /etc/yum.repos.d/centos-stream9.repo <<'REPO'
-[cs9-baseos]
-name=CentOS Stream 9 - BaseOS
-baseurl=https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/
-gpgcheck=0
-enabled=1
-
-[cs9-appstream]
-name=CentOS Stream 9 - AppStream
-baseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
-gpgcheck=0
-enabled=1
-REPO
-            echo "  [OK] CentOS Stream 9 repos added."
-            ;;
-
-        *)
-            echo "  Invalid choice. Exiting."
-            exit 1
-            ;;
-    esac
+    subscription-manager register --username "$RHSM_USER" --password "$RHSM_PASS" --force
 fi
+
 
 # =============================================================
 # PART 1 — DNS (BIND)
@@ -205,7 +142,7 @@ echo "============================================="
 # STEP 1 — Install BIND
 # ----------------------------
 echo "[1/7] Installing BIND..."
-dnf install -y bind bind-utils
+rpm -q bind bind-utils &>/dev/null && echo "  Already installed — skipping." || dnf install -y bind bind-utils
 
 # ----------------------------
 # STEP 2 — /etc/hosts + /etc/resolv.conf
@@ -233,6 +170,9 @@ add_ptr "$BASTION_IP"  "$BASTION_HOSTNAME.$DOMAIN"
 # API / Ingress (may be same subnet as bastion, or different)
 add_ptr "$API_IP"      "api.$CLUSTER_NAME.$DOMAIN"
 add_ptr "$API_IP"      "api-int.$CLUSTER_NAME.$DOMAIN"
+
+# Bootstrap
+add_ptr "$BOOTSTRAP_IP"  "bootstrap.$CLUSTER_NAME.$DOMAIN"
 
 # Masters
 add_ptr "$MASTER1_IP"  "master-1.$CLUSTER_NAME.$DOMAIN"
@@ -311,6 +251,8 @@ api.$CLUSTER_NAME       IN A  $API_IP
 api-int.$CLUSTER_NAME   IN A  $API_IP
 
 *.apps.$CLUSTER_NAME    IN A  $INGRESS_IP
+
+bootstrap.$CLUSTER_NAME IN A  $BOOTSTRAP_IP
 
 master-1.$CLUSTER_NAME  IN A  $MASTER1_IP
 master-2.$CLUSTER_NAME  IN A  $MASTER2_IP
@@ -416,6 +358,7 @@ check_forward "$BASTION_HOSTNAME.$DOMAIN"        "$BASTION_IP"
 check_forward "api.$CLUSTER_NAME.$DOMAIN"        "$API_IP"
 check_forward "api-int.$CLUSTER_NAME.$DOMAIN"    "$API_IP"
 check_forward "test.apps.$CLUSTER_NAME.$DOMAIN"  "$INGRESS_IP"
+check_forward "bootstrap.$CLUSTER_NAME.$DOMAIN"  "$BOOTSTRAP_IP"
 check_forward "master-1.$CLUSTER_NAME.$DOMAIN"   "$MASTER1_IP"
 check_forward "master-2.$CLUSTER_NAME.$DOMAIN"   "$MASTER2_IP"
 check_forward "master-3.$CLUSTER_NAME.$DOMAIN"   "$MASTER3_IP"
@@ -432,6 +375,7 @@ echo " Reverse Lookups"
 echo "============================================="
 check_reverse "$BASTION_IP" "$BASTION_HOSTNAME.$DOMAIN"
 check_reverse "$API_IP"     "api.$CLUSTER_NAME.$DOMAIN"
+check_reverse "$BOOTSTRAP_IP" "bootstrap.$CLUSTER_NAME.$DOMAIN"
 check_reverse "$MASTER1_IP" "master-1.$CLUSTER_NAME.$DOMAIN"
 check_reverse "$MASTER2_IP" "master-2.$CLUSTER_NAME.$DOMAIN"
 check_reverse "$MASTER3_IP" "master-3.$CLUSTER_NAME.$DOMAIN"
@@ -465,7 +409,7 @@ echo " PART 2 — HAProxy Setup"
 echo "============================================="
 
 echo "[1/3] Installing HAProxy..."
-dnf install -y haproxy
+rpm -q haproxy &>/dev/null && echo "  Already installed — skipping." || dnf install -y haproxy
 
 echo "[2/3] Writing /etc/haproxy/haproxy.cfg..."
 
@@ -499,6 +443,7 @@ frontend api
 
 backend api_backend
     balance roundrobin
+    server bootstrap $BOOTSTRAP_IP:6443 check
     server master-1 $MASTER1_IP:6443 check
     server master-2 $MASTER2_IP:6443 check
     server master-3 $MASTER3_IP:6443 check
@@ -512,6 +457,7 @@ frontend mcs
 
 backend mcs_backend
     balance roundrobin
+    server bootstrap $BOOTSTRAP_IP:22623 check
     server master-1 $MASTER1_IP:22623 check
     server master-2 $MASTER2_IP:22623 check
     server master-3 $MASTER3_IP:22623 check
